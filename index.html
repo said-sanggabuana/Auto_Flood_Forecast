@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Katingan EWS WebGIS Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+        #map { height: 100vh; width: 100vw; z-index: 1; }
+        .dashboard-panel {
+            position: absolute; top: 20px; right: 20px; z-index: 1000;
+            background: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15); width: 320px;
+        }
+        .slider-panel {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 1000;
+            background: rgba(255, 255, 255, 0.95); padding: 20px 40px; border-radius: 50px;
+            box-shadow: 0 4px 25px rgba(0,0,0,0.2); width: 60%; display: flex; flex-direction: column; align-items: center;
+        }
+        .slider-container { display: flex; align-items: center; width: 100%; gap: 20px; }
+        .timeline-slider { flex-grow: 1; -webkit-appearance: none; height: 8px; border-radius: 5px; background: #ddd; outline: none; cursor: pointer; }
+        .timeline-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #2980b9; cursor: pointer; transition: 0.1s; }
+        .timeline-slider::-webkit-slider-thumb:hover { background: #c0392b; transform: scale(1.2); }
+        .btn-play { background: #2980b9; color: white; border: none; padding: 10px 20px; border-radius: 20px; font-weight: bold; cursor: pointer; min-width: 80px; }
+        .btn-play:hover { background: #1a5276; }
+        .ticker { font-size: 16px; font-weight: bold; color: #2c3e50; margin-top: 8px; text-align: center; }
+        .status { color: #d35400; font-weight: bold; }
+        .success { color: #27ae60; }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-panel">
+        <h2>🚨 Katingan Early Warning System</h2>
+        <hr>
+        <p><strong>System Status:</strong> <span id="status-text" class="status">Connecting to Backend API...</span></p>
+        <p><strong>Forecast Target:</strong> <span id="date-text" style="font-weight: bold; color:#2980b9;">--</span></p>
+        <p><strong>Inflow Volume:</strong> <span id="flow-text" style="font-size: 20px; font-weight: bold; color:#c0392b;">--</span> m³/s</p>
+        <p><strong>Inundated Area:</strong> <span id="area-text">--</span> active cells</p>
+    </div>
+
+    <div class="slider-panel">
+        <div class="slider-container">
+            <button id="play-btn" class="btn-play">▶ PLAY</button>
+            <input type="range" id="time-slider" class="timeline-slider" min="0" max="0" value="0" disabled>
+        </div>
+        <div id="time-ticker" class="ticker">Awaiting cloud server handshake...</div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        // CRITICAL: preferCanvas forces the browser's GPU to paint points on a single layer
+        var map = L.map('map', { preferCanvas: true }).setView([-1.90, 113.40], 12); 
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 18, attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        var floodLayerGroup = L.layerGroup().addTo(map);
+        var timelineDates = [];
+        var timelineFlows = [];
+        var activeIndex = 0;
+        var isPlaying = false;
+        var playInterval;
+
+        const slider = document.getElementById('time-slider');
+        const playBtn = document.getElementById('play-btn');
+        const timeTicker = document.getElementById('time-ticker');
+
+        // PRODUCTION SETTING: Swap 'http://127.0.0.1:8000' with your live Render URL when moving to the cloud
+        const API_BASE = "http://127.0.0.1:8000"; 
+
+        fetch(`${API_BASE}/api/init`)
+            .then(res => res.json())
+            .then(metadata => {
+                timelineDates = metadata.timeline;
+                timelineFlows = metadata.flows;
+                slider.max = metadata.steps_count - 1;
+                slider.disabled = false;
+                
+                document.getElementById('status-text').innerText = "Live Cloud Stream Active";
+                document.getElementById('status-text').className = "status success";
+                renderFloodStep(0);
+            })
+            .catch(err => {
+                document.getElementById('status-text').innerText = "Server Offline";
+                timeTicker.innerText = "Error syncing forecast data pipeline.";
+            });
+
+        // 🚀 Add 'return' so the browser knows when the map is finished drawing
+        function renderFloodStep(index) {
+            activeIndex = index;
+            slider.value = index;
+            var targetDate = timelineDates[index];
+            var targetFlow = timelineFlows[index];
+
+            document.getElementById('date-text').innerText = targetDate;
+            document.getElementById('flow-text').innerText = targetFlow.toFixed(2);
+            timeTicker.innerText = `⏱️ Selected Frame: ${targetDate} | Flow rate: ${targetFlow.toFixed(1)} m³/s`;
+
+            return fetch(`${API_BASE}/api/map?flow=${targetFlow}`)
+                .then(res => res.json())
+                .then(payload => {
+                    floodLayerGroup.clearLayers();
+                    document.getElementById('area-text').innerText = payload.total_flooded_pixels.toLocaleString();
+
+                    payload.data.forEach(point => {
+                        var cellColor = point.depth > 3.0 ? '#c0392b' : 
+                                        point.depth > 1.0 ? '#e67e22' : '#3498db';
+
+                        L.circle([point.lat, point.lng], {
+                            color: cellColor, fillColor: cellColor, fillOpacity: 0.6, radius: 35
+                        }).bindPopup(`<b>Depth:</b> ${point.depth} meters`).addTo(floodLayerGroup);
+                    });
+                });
+        }
+
+        // 🚀 The new "Smart" Playback Loop
+        function togglePlay() {
+            if (isPlaying) {
+                isPlaying = false;
+                playBtn.innerText = "▶ PLAY";
+            } else {
+                isPlaying = true;
+                playBtn.innerText = "⏸ PAUSE";
+                playNextFrame(); 
+            }
+        }
+
+        function playNextFrame() {
+            if (!isPlaying) return; // Stop if user hit pause
+            
+            let nextIndex = activeIndex + 1;
+            if (nextIndex >= timelineDates.length) nextIndex = 0; // Loop to start
+            
+            // 🚀 Wait for the AI render to finish completely...
+            renderFloodStep(nextIndex).then(() => {
+                if (isPlaying) {
+                    // ...then wait half a second so the user can look at it, then draw next frame!
+                    setTimeout(playNextFrame, 500); 
+                }
+            });
+        }
+
+        playBtn.addEventListener('click', togglePlay);
+
+        slider.addEventListener('change', function(e) {
+            if (isPlaying) togglePlay();
+            renderFloodStep(parseInt(e.target.value));
+        });
+
+        function togglePlay() {
+            if (isPlaying) {
+                clearInterval(playInterval);
+                playBtn.innerText = "▶ PLAY";
+                isPlaying = false;
+            } else {
+                playBtn.innerText = "⏸ PAUSE";
+                isPlaying = true;
+                playInterval = setInterval(() => {
+                    let nextIndex = activeIndex + 1;
+                    if (nextIndex >= timelineDates.length) nextIndex = 0;
+                    renderFloodStep(nextIndex);
+                }, 1200); // 1.2 second animation delay between timesteps
+            }
+        }
+        playBtn.addEventListener('click', togglePlay);
+    </script>
+</body>
+</html>
